@@ -145,7 +145,7 @@ fi
 # Detect Ubuntu version for choosing the matching prebuilt binary
 UBUNTU_VERSION=$(lsb_release -rs)
 # Set binary download URL (update this if your release URL pattern is different)
-BINARY_URL="https://github.com/Qubetics/dvpn-node-script/releases/download/ubuntu${UBUNTU_VERSION}/${BINARY}"
+BINARY_URL="https://github.com/Qubetics/stage-dvpn-node-script/releases/download/ubuntu${UBUNTU_VERSION}/${BINARY}"
 echo $BINARY_URL
 
 # Target directory for binary based on current Go installation path
