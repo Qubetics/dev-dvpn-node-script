@@ -1,4 +1,4 @@
-## Qubetics dVPN Node Script
+## Qubetics dev dVPN Node Script
 
 This repository contains helper scripts to install prerequisites, configure WireGuard, and manage a Qubetics dVPN node via systemd.
 
@@ -22,7 +22,7 @@ Notes:
 ### 1) Install Go (first-time setup)
 
 ```bash
-cd /data/projects/projects/2025/dvpn-code/dvpn-node-script
+cd /dev-dvpn-node-script
 sudo bash ./install-go.sh
 ```
 
@@ -108,9 +108,9 @@ Uninstall:
 
 ### How WireGuard settings sync into the node config
 On `start`, the script reads `/etc/wireguard/wg0.conf` and updates the `[wireguard]` section of `~/.qubetics-dvpnx/config.toml` with:
-- `ipv4_addr` ← `Address`
-- `port` ← `ListenPort`
-- `private_key` ← `PrivateKey` (padding fixed if needed)
+- `ipv4_addr` -> `Address`
+- `port` > `ListenPort`
+- `private_key` > `PrivateKey`
 
 Ensure your `wg0.conf` is correct before starting the node.
 
@@ -118,12 +118,18 @@ Ensure your `wg0.conf` is correct before starting the node.
 
 ### Quickstart
 ```bash
-cd /dvpn-node-script
+cd /dev-dvpn-node-script
+
 sudo bash ./setup_wireguard.sh
+
 sudo systemctl enable --now wg-quick@wg0
+
 ./start-node.sh init
+
 ./start-node.sh start
+
 sudo systemctl start dvpn-node.service
+
 ./start-node.sh status
 ```
 
