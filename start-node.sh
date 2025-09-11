@@ -262,7 +262,7 @@ function cmd_start {
     write_systemd_unit
     sudo systemctl daemon-reload
     sudo systemctl enable dvpn-node.service 
-    # sudo systemctl start dvpn-node.service 
+    sudo systemctl start dvpn-node.service 
 
     log "Waiting 30 seconds for node to initialize..."
     sleep 30
