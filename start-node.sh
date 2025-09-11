@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeou pipefail
 
-# Qubetics dVPN Node management script
+# Qubetics dev dVPN Node management script
 # - Provides commands: init, start, stop, restart, status, uninstall-wireguard, uninstall-service
 # - Writes a systemd unit to run the node and syncs WireGuard settings into config.toml
 # - Safe by default: strict bash mode, clear logging, and minimal side effects
@@ -145,7 +145,7 @@ fi
 # Detect Ubuntu version for choosing the matching prebuilt binary
 UBUNTU_VERSION=$(lsb_release -rs)
 # Set binary download URL (update this if your release URL pattern is different)
-BINARY_URL="https://github.com/Qubetics/stage-dvpn-node-script/releases/download/ubuntu${UBUNTU_VERSION}/${BINARY}"
+BINARY_URL="https://github.com/Qubetics/dev-dvpn-node-script/releases/download/ubuntu${UBUNTU_VERSION}/${BINARY}"
 echo $BINARY_URL
 
 # Target directory for binary based on current Go installation path
