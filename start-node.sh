@@ -1,42 +1,19 @@
 #!/usr/bin/env bash
 
-# --- Go Installation Check ---
-if ! command -v go &> /dev/null; then
-  echo "Go not found. Installing Go..."
-  bash "$(dirname "$0")/install-go.sh"
-  source ~/.profile
-  source ~/.bashrc
-  echo "Go installed and environment updated."
-else
-  echo "Go is already installed. Skipping installation."
-fi
-
 set -Eeou pipefail
+
 NODE_DIR="${HOME}/.qubetics-dvpnx"
 BINARY="${BINARY:-qubetics-dvpnx}"  # Default binary name; override by setting $BINARY
-CONTAINER_NAME=qubetics-node  # For legacy cmd compatibility
+CONTAINER_NAME=qubetics-node 
 API_PORT=18133
 SERVICE_PORT=21529
 PUBLIC_IP=$(curl -fsSL https://ifconfig.me)
-
-# --- Binary Download Logic ---
-# Detect Ubuntu version
-UBUNTU_VERSION=$(lsb_release -rs | cut -d. -f1)
-
-# Set binary download URL (update this if your release URL pattern is different)
-BINARY_URL="https://github.com/Qubetics/dvpn-node-script/releases/latest/download/${BINARY}-ubuntu${UBUNTU_VERSION}"
-
-
-# Target directory for binary
-INSTALL_PATH="/usr/local/bin/"
-mkdir -p "$INSTALL_PATH"
-
-# Download and move binary
-echo "Downloading binary for Ubuntu $UBUNTU_VERSION: $BINARY_URL"
-curl -L "$BINARY_URL" -o "/tmp/${BINARY}"
-chmod +x "/tmp/${BINARY}"
-mv "/tmp/${BINARY}" "$INSTALL_PATH${BINARY}"
-echo "Binary moved to $INSTALL_PATH${BINARY}"
+CHAIN_RPC="http://111.119.253.129:26657"
+CHAIN_ID="qubetics_9003-1"
+KEYRING_BACKEND="test"
+KEYRING_NAME="qubetics"
+LOG_LEVEL="debug"
+WG_CONF="/etc/wireguard/wg0.conf"
 
 function cmd_help {
   echo "Usage: ${0} [COMMAND]"
@@ -50,7 +27,51 @@ function cmd_help {
   echo "  help       Print this help message"
 }
 
+
+
+
+
+
+
 function cmd_init {
+  # --- Go Installation Check ---
+if ! command -v go &> /dev/null; then
+  echo "Go not found. Installing Go..."
+  bash "$(dirname "$0")/install-go.sh"
+  source ~/.profile
+  source ~/.bashrc
+  echo "Go installed and environment updated."
+else
+  echo "Go is already installed. Skipping installation."
+fi
+
+# --- Binary Download Logic ---
+# Detect Ubuntu version
+UBUNTU_VERSION=$(lsb_release -rs)
+# Set binary download URL (update this if your release URL pattern is different)
+BINARY_URL="https://github.com/Qubetics/dvpn-node-script/releases/download/ubuntu${UBUNTU_VERSION}/${BINARY}"
+echo $BINARY_URL
+
+
+# curl -k https://101.44.160.159:18133/
+# Target directory for binary
+GOLANGPATH=$(which go)
+INSTALL_PATH="$(dirname "$GOLANGPATH")"
+# Remove trailing '/go' if present
+if [[ "$INSTALL_PATH" == */go ]]; then
+  INSTALL_PATH="${INSTALL_PATH%/go}"
+fi
+echo "INSTALL PATH OF THE BINARY:" $INSTALL_PATH/
+
+
+# Download and move binary
+echo "Downloading binary for Ubuntu $UBUNTU_VERSION: $BINARY_URL"
+curl -L "$BINARY_URL" -o "/tmp/${BINARY}"
+chmod +x "/tmp/${BINARY}"
+sudo mv "/tmp/${BINARY}" "$INSTALL_PATH/${BINARY}"
+echo "Binary moved to $INSTALL_PATH/${BINARY}"
+
+
   mkdir -p "${NODE_DIR}"
   MONIKER="node-$(openssl rand -hex 4)"
   
@@ -78,11 +99,11 @@ function cmd_init {
     --node.gigabyte-prices "200;200;tics" \
     --node.hourly-prices "20;20;tics" \
     --node.type "${NODE_TYPE}" \
-    --rpc.addrs "http://111.119.253.129:26657" \
-    --rpc.chain-id "qubetics_9009-1" \
+    --rpc.addrs "${CHAIN_RPC}" \
+    --rpc.chain-id "${CHAIN_ID}" \
     --with-tls \
-    --keyring.backend "test" \
-    --keyring.name "qubetics"
+    --keyring.backend "${KEYRING_BACKEND}" \
+    --keyring.name "${KEYRING_NAME}"
 
  
 
@@ -93,8 +114,8 @@ function cmd_init {
   fi
   "${BINARY}" keys add "${ACCOUNT_NAME}" \
     --home "${NODE_DIR}" \
-    --keyring.backend "test" \
-    --keyring.name "qubetics"
+    --keyring.backend "${KEYRING_BACKEND}" \
+    --keyring.name "${KEYRING_NAME}"
 
   # Update from_name in config.toml with the account name
   if [[ -f "${NODE_DIR}/config.toml" ]]; then
@@ -113,6 +134,43 @@ function cmd_init {
 
 
 function cmd_start {
+    #  wg-quick down wg0
+    # Extract WireGuard config values using sudo
+if sudo test -f "$WG_CONF"; then
+  WG_ADDRESS=$(sudo grep -m1 '^Address' "$WG_CONF" | sed -E 's/.*[:=][[:space:]]*//')
+  WG_LISTENPORT=$(sudo grep -m1 '^ListenPort' "$WG_CONF" | awk -F '=' '{print $2}')
+  WG_PRIVATEKEY=$(sudo grep -m1 '^PrivateKey' "$WG_CONF" | awk -F '=' '{print $2}')
+  PRIVATE_KEY=$(echo "$WG_PRIVATEKEY" | xargs)
+  if [[ "$PRIVATE_KEY" != *= ]]; then
+    PRIVATE_KEY="${PRIVATE_KEY}="
+  fi
+  echo "WireGuard Config:"
+  echo "- Address: $WG_ADDRESS"
+  echo "- ListenPort: $WG_LISTENPORT"
+  echo "- PrivateKey: $PRIVATE_KEY"
+else
+  echo "WireGuard config not found at $WG_CONF"
+fi
+
+# Update ~/.qubetics-dvpnx/config.toml [wireguard] section with values from wg0.conf
+CONFIG_TOML="${NODE_DIR}/config.toml"
+if [[ -f "$CONFIG_TOML" ]]; then
+  # Extract first IPv4 address from WG_ADDRESS (Address can be comma-separated and include IPv6)
+  if [[ -n "$WG_ADDRESS" && -n "$WG_LISTENPORT" && -n "$WG_PRIVATEKEY" ]]; then
+    echo "Updating $CONFIG_TOML [wireguard] ipv4_addr, port, private_key"
+    cp "$CONFIG_TOML" "${CONFIG_TOML}.bak.$(date +%s)"
+    # Replace only inside [wireguard] section
+    sed -i -E '/^\[wireguard\]/,/^\[/ {
+      s|^ipv4_addr = .*|ipv4_addr = "'"${WG_ADDRESS//&/\\&}"'"|
+      s|^port = .*|port = "'"${WG_LISTENPORT//&/\\&}"'"|
+      s|^private_key = .*|private_key = "'"${PRIVATE_KEY//&/\\&}"'"|
+    }' "$CONFIG_TOML"
+  else
+    echo "WireGuard values missing; skipping config.toml update"
+  fi
+else
+  echo "Config file not found at $CONFIG_TOML"
+fi
     echo "=== Starting Node ==="
     # Generate random ports
     mapfile -t PORTS < <(shuf -i 1024-65535 -n 2)
@@ -154,14 +212,47 @@ function cmd_start {
 
   
   echo "Starting node with command:"
-  echo "${BINARY} start --home ${NODE_DIR} --keyring.backend test --node.remote-addrs ${NODE_REMOTE_URL}"
+  echo "${BINARY} start --home ${NODE_DIR} --keyring.backend ${KEYRING_BACKEND} --node.remote-addrs ${NODE_REMOTE_URL}"
   
   # Start the node
-  "${BINARY}" start \
-    --home "${NODE_DIR}" \
-    --keyring.backend "test"
-    --log.level "debug" 
+  # "${BINARY}" start \
+  #   --home "${NODE_DIR}" \
+  #   --keyring.backend "${KEYRING_BACKEND}"
+  #   --log.level "${LOG_LEVEL}" 
+#   sudo systemctl start wg-quick@wg0
+# echo "Starting node:"
+# #========================================================================================================================================================
+# sudo su -c  "echo '[Unit]
+# Description=Qubetics dVPN Node
+# Wants=network-online.target
+# After=network-online.target
+# [Service]
+# User=$(whoami)
+# Group=$(whoami)
+# Type=simple
+# ExecStart=/${HOME}/.go/bin/qubetics-dvpnx start --home $NODE_DIR --keyring.backend test
+# Restart=always
+# RestartSec=5
+# LimitNOFILE=65536
+# Environment="DAEMON_NAME=$BINARY"
+# Environment="DAEMON_HOME="$NODE_DIR""
+# Environment="DAEMON_ALLOW_DOWNLOAD_BINARIES=false"
+# Environment="DAEMON_RESTART_AFTER_UPGRADE=true"
+# Environment="DAEMON_LOG_BUFFER_SIZE=512"
+# Environment="UNSAFE_SKIP_BACKUP=false"
+# [Install]
+# WantedBy=multi-user.target'> /etc/systemd/system/dvpn-node.service"
 
+# sudo systemctl daemon-reload
+# sudo systemctl enable dvpn-node.service 
+# sudo systemctl start dvpn-node.service 
+
+# # Wait a few minutes before fetching node address
+# echo "Waiting 30 seconds for node to initialize..."
+# sleep 30
+# NODE_ADDR=$(curl -sk https://$PUBLIC_IP:$API_PORT | jq -r '.result.addr')
+# NODE_ADDR=$(curl -sk https://125.21.216.158:18133 | jq -r '.result.addr')
+# echo "Node address: $NODE_ADDR"
 }
 
 function cmd_status {
@@ -190,3 +281,5 @@ case "${v}" in
   "status") cmd_status ;;
   "help" | *) cmd_help ;;
 esac
+
+

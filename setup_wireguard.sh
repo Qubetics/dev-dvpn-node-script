@@ -94,6 +94,11 @@ show_usage() {
     exit 1
 }
 
+wireguard_install(){
+    sudo apt update
+    sudo apt install -y wireguard wireguard-tools
+
+}
 # Parse command line arguments
 parse_arguments() {
     while [[ $# -gt 0 ]]; do
@@ -115,6 +120,7 @@ parse_arguments() {
 
 # Main execution
 main() {
+     wireguard_install
     parse_arguments "$@"
     check_root
     handle_keys
