@@ -1,43 +1,139 @@
 #!/usr/bin/env bash
-
 set -Eeou pipefail
+
+# Qubetics dVPN Node management script
+# - Provides commands: init, start, stop, restart, status, uninstall-wireguard, uninstall-service
+# - Writes a systemd unit to run the node and syncs WireGuard settings into config.toml
+# - Safe by default: strict bash mode, clear logging, and minimal side effects
 
 NODE_DIR="${HOME}/.qubetics-dvpnx"
 BINARY="${BINARY:-qubetics-dvpnx}"  # Default binary name; override by setting $BINARY
-CONTAINER_NAME=qubetics-node 
 API_PORT=18133
-SERVICE_PORT=21529
 PUBLIC_IP=$(curl -fsSL https://ifconfig.me)
 CHAIN_RPC="http://111.119.253.129:26657"
 CHAIN_ID="qubetics_9003-1"
 KEYRING_BACKEND="test"
 KEYRING_NAME="qubetics"
-LOG_LEVEL="debug"
 WG_CONF="/etc/wireguard/wg0.conf"
+SYSTEMD_UNIT="/etc/systemd/system/dvpn-node.service"
+NODE_TYPE="wireguard"
+CONFIG_TOML="${NODE_DIR}/config.toml"
+NODE_INTERVAL_SESSION_USAGE_SYNC_WITH_BLOCKCHAIN="540s"
+NODE_INTERVAL_SESSION_VALIDATE="60s"
+NODE_INTERVAL_STATUS_UPDATE="240s"
 
+# Lightweight helpers
+log() { echo "[INFO] $*"; }
+err() { echo "[ERROR] $*" >&2; }
+require() { command -v "$1" >/dev/null 2>&1 || { err "Missing required command: $1"; exit 1; }; }
+# Attempt to detect a routable public IP quickly without failing the script
+detect_public_ip() { curl -fsSL --max-time 5 https://ifconfig.me || true; }
+
+
+# Sync wireguard settings from wg0.conf into config.toml
+update_wireguard_config_from_wg() {
+  # Read core fields from /etc/wireguard/wg0.conf (if present)
+  if sudo test -f "$WG_CONF"; then
+  WG_ADDRESS=$(sudo grep -m1 '^Address' "$WG_CONF" | sed -E 's/.*[:=][[:space:]]*//')
+  WG_LISTENPORT=$(sudo grep -m1 '^ListenPort' "$WG_CONF" | sed -E 's/.*[:=][[:space:]]*//')
+  WG_PRIVATEKEY=$(sudo grep -m1 '^PrivateKey' "$WG_CONF" | awk -F '=' '{print $2}')
+  PRIVATE_KEY=$(echo "$WG_PRIVATEKEY" | xargs)
+  # Ensure WireGuard private key ends with '=' padding when needed
+  if [[ "$PRIVATE_KEY" != *= ]]; then
+    PRIVATE_KEY="${PRIVATE_KEY}="
+  fi
+  echo "WireGuard Config:"
+  echo "- Address: $WG_ADDRESS"
+  echo "- ListenPort: $WG_LISTENPORT"
+  echo "- PrivateKey: $PRIVATE_KEY"
+else
+  echo "WireGuard config not found at $WG_CONF"
+fi
+
+# Update ~/.qubetics-dvpnx/config.toml [wireguard] section with values from wg0.conf
+if [[ -f "$CONFIG_TOML" ]]; then
+  # Only update when all required fields are available
+  if [[ -n "$WG_ADDRESS" && -n "$WG_LISTENPORT" && -n "$WG_PRIVATEKEY" ]]; then
+    echo "Updating $CONFIG_TOML [wireguard] ipv4_addr, port, private_key"
+    # Create a timestamped backup before in-place edits
+    cp "$CONFIG_TOML" "${CONFIG_TOML}.bak.$(date +%s)"
+    # Replace only inside [wireguard] section using a bounded sed range
+    sed -i -E '/^\[wireguard\]/,/^\[/ {
+      s|^ipv4_addr = .*|ipv4_addr = '"'"${WG_ADDRESS//&/\\&}"'"'|
+      s|^port = .*|port = '"'"${WG_LISTENPORT//&/\\&}"'"'|
+      s|^private_key = .*|private_key = '"'"${PRIVATE_KEY//&/\\&}"'"'|
+    }' "$CONFIG_TOML"
+  else
+    echo "WireGuard values missing; skipping config.toml update"
+  fi
+else
+  echo "Config file not found at $CONFIG_TOML"
+fi
+}
+
+# Write or update the systemd unit for the node
+write_systemd_unit() {
+  BIN_PATH=$(command -v "${BINARY}" || true)
+  if [[ -z "$BIN_PATH" ]]; then
+    err "Binary ${BINARY} not found in PATH"; exit 1
+  fi
+  # Emit a minimal, resilient unit file to run the node as the current user
+  sudo bash -c "cat > ${SYSTEMD_UNIT}" <<EOF
+[Unit]
+Description=Qubetics dVPN Node
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=$(whoami)
+Group=$(whoami)
+Type=simple
+ExecStart=${BIN_PATH} start --home ${NODE_DIR} --keyring.backend ${KEYRING_BACKEND}
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+Environment=DAEMON_NAME=${BINARY}
+Environment=DAEMON_HOME=${NODE_DIR}
+Environment=DAEMON_ALLOW_DOWNLOAD_BINARIES=false
+Environment=DAEMON_RESTART_AFTER_UPGRADE=true
+Environment=DAEMON_LOG_BUFFER_SIZE=512
+Environment=UNSAFE_SKIP_BACKUP=false
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# Human-friendly CLI help
 function cmd_help {
   echo "Usage: ${0} [COMMAND]"
   echo ""
   echo "Commands:"
   echo "  init       Initialize configuration and keys"
-  echo "  start      Start the node"
-  echo "  stop       Stop the node process (if backgrounded)"
-  echo "  restart    Restart the node"
-  echo "  status     Show node logs (if running)"
+  echo "  start      Configure and start the node via systemd"
+  echo "  stop       Stop the systemd service"
+  echo "  restart    Restart the systemd service"
+  echo "  status     Show service status and recent logs"
+  echo "  uninstall-wireguard  Bring down interfaces, purge packages, remove /etc/wireguard"
+  echo "  uninstall-service    Stop/disable service, remove unit file and node data"
   echo "  help       Print this help message"
 }
 
 
-
-
-
-
-
+# Initialize node: ensure Go and binary, create config, and add keys
 function cmd_init {
+  # --- WireGuard prerequisite check ---
+  if ! command -v wg >/dev/null 2>&1 || ! command -v wg-quick >/dev/null 2>&1; then
+    err "WireGuard is not installed. Please install it before initializing the node."
+    echo "To install via script: sudo ./setup_wireguard.sh\""
+    echo "Or install manually"
+    exit 1
+  fi
   # --- Go Installation Check ---
 if ! command -v go &> /dev/null; then
   echo "Go not found. Installing Go..."
   bash "$(dirname "$0")/install-go.sh"
+  # Reload env so newly installed Go is available in this session
   source ~/.profile
   source ~/.bashrc
   echo "Go installed and environment updated."
@@ -46,32 +142,29 @@ else
 fi
 
 # --- Binary Download Logic ---
-# Detect Ubuntu version
+# Detect Ubuntu version for choosing the matching prebuilt binary
 UBUNTU_VERSION=$(lsb_release -rs)
 # Set binary download URL (update this if your release URL pattern is different)
 BINARY_URL="https://github.com/Qubetics/dvpn-node-script/releases/download/ubuntu${UBUNTU_VERSION}/${BINARY}"
 echo $BINARY_URL
 
-
-# curl -k https://101.44.160.159:18133/
-# Target directory for binary
+# Target directory for binary based on current Go installation path
 GOLANGPATH=$(which go)
 INSTALL_PATH="$(dirname "$GOLANGPATH")"
-# Remove trailing '/go' if present
+# Remove trailing '/go' if present to use the parent bin directory
 if [[ "$INSTALL_PATH" == */go ]]; then
   INSTALL_PATH="${INSTALL_PATH%/go}"
 fi
 echo "INSTALL PATH OF THE BINARY:" $INSTALL_PATH/
 
-
-# Download and move binary
+# Download and install the node binary into the chosen install path
 echo "Downloading binary for Ubuntu $UBUNTU_VERSION: $BINARY_URL"
 curl -L "$BINARY_URL" -o "/tmp/${BINARY}"
 chmod +x "/tmp/${BINARY}"
 sudo mv "/tmp/${BINARY}" "$INSTALL_PATH/${BINARY}"
 echo "Binary moved to $INSTALL_PATH/${BINARY}"
 
-
+  # Prepare node home and select a moniker
   mkdir -p "${NODE_DIR}"
   MONIKER="node-$(openssl rand -hex 4)"
   
@@ -83,11 +176,11 @@ echo "Binary moved to $INSTALL_PATH/${BINARY}"
   echo "Detected public IP: ${PUBLIC_IP}"
   echo "Generated moniker: ${MONIKER}"
   echo "Selected API port: ${API_PORT}"
-  echo "Selected service port: ${SERVICE_PORT}"
   echo ""
 
-  read -p "Enter node type [v2ray|wireguard] (default: wireguard): " NODE_TYPE
-  NODE_TYPE="${NODE_TYPE:-wireguard}"
+  # Default to wireguard node type (v2ray supported but not the default here)
+  # read -p "Enter node type [v2ray|wireguard] (default: wireguard): " NODE_TYPE
+  # NODE_TYPE="${NODE_TYPE:-wireguard}"
 
   echo "Initializing config..."
   "${BINARY}" init \
@@ -103,7 +196,10 @@ echo "Binary moved to $INSTALL_PATH/${BINARY}"
     --rpc.chain-id "${CHAIN_ID}" \
     --with-tls \
     --keyring.backend "${KEYRING_BACKEND}" \
-    --keyring.name "${KEYRING_NAME}"
+    --keyring.name "${KEYRING_NAME}" \
+    --node.interval-session-usage-sync-with-blockchain "${NODE_INTERVAL_SESSION_USAGE_SYNC_WITH_BLOCKCHAIN}" \
+    --node.interval-session-validate "${NODE_INTERVAL_SESSION_VALIDATE}" \
+    --node.interval-status-update "${NODE_INTERVAL_STATUS_UPDATE}" \
 
  
 
@@ -117,7 +213,7 @@ echo "Binary moved to $INSTALL_PATH/${BINARY}"
     --keyring.backend "${KEYRING_BACKEND}" \
     --keyring.name "${KEYRING_NAME}"
 
-  # Update from_name in config.toml with the account name
+  # Keep CLI transactions consistent by setting from_name in config.toml
   if [[ -f "${NODE_DIR}/config.toml" ]]; then
     # Use sed to update the from_name field
     if sed -i "s/^from_name = .*/from_name = \"${ACCOUNT_NAME}\"/" "${NODE_DIR}/config.toml"; then
@@ -128,146 +224,135 @@ echo "Binary moved to $INSTALL_PATH/${BINARY}"
   fi
 
   echo "====================================================================================="
-  echo "  Please make sure that the key has balance added to it before running START command"
+  echo "Copy the mnemonics and key address to a safe place"
+  echo "Please make sure that the key has balance added to it before running START command"
   echo "====================================================================================="
 }
 
 
+# Configure and start the node via systemd, then report basic health info
 function cmd_start {
-    #  wg-quick down wg0
-    # Extract WireGuard config values using sudo
-if sudo test -f "$WG_CONF"; then
-  WG_ADDRESS=$(sudo grep -m1 '^Address' "$WG_CONF" | sed -E 's/.*[:=][[:space:]]*//')
-  WG_LISTENPORT=$(sudo grep -m1 '^ListenPort' "$WG_CONF" | awk -F '=' '{print $2}')
-  WG_PRIVATEKEY=$(sudo grep -m1 '^PrivateKey' "$WG_CONF" | awk -F '=' '{print $2}')
-  PRIVATE_KEY=$(echo "$WG_PRIVATEKEY" | xargs)
-  if [[ "$PRIVATE_KEY" != *= ]]; then
-    PRIVATE_KEY="${PRIVATE_KEY}="
-  fi
-  echo "WireGuard Config:"
-  echo "- Address: $WG_ADDRESS"
-  echo "- ListenPort: $WG_LISTENPORT"
-  echo "- PrivateKey: $PRIVATE_KEY"
-else
-  echo "WireGuard config not found at $WG_CONF"
-fi
+    # Proactively bring down wg0 to avoid stale state (ignore errors)
+    wg-quick down wg0 || true
+    if [[ ! -f "${NODE_DIR}/config.toml" ]]; then
+      err "Config file not found at ${NODE_DIR}/config.toml"; exit 1
+    fi
 
-# Update ~/.qubetics-dvpnx/config.toml [wireguard] section with values from wg0.conf
-CONFIG_TOML="${NODE_DIR}/config.toml"
-if [[ -f "$CONFIG_TOML" ]]; then
-  # Extract first IPv4 address from WG_ADDRESS (Address can be comma-separated and include IPv6)
-  if [[ -n "$WG_ADDRESS" && -n "$WG_LISTENPORT" && -n "$WG_PRIVATEKEY" ]]; then
-    echo "Updating $CONFIG_TOML [wireguard] ipv4_addr, port, private_key"
-    cp "$CONFIG_TOML" "${CONFIG_TOML}.bak.$(date +%s)"
-    # Replace only inside [wireguard] section
-    sed -i -E '/^\[wireguard\]/,/^\[/ {
-      s|^ipv4_addr = .*|ipv4_addr = "'"${WG_ADDRESS//&/\\&}"'"|
-      s|^port = .*|port = "'"${WG_LISTENPORT//&/\\&}"'"|
-      s|^private_key = .*|private_key = "'"${PRIVATE_KEY//&/\\&}"'"|
-    }' "$CONFIG_TOML"
-  else
-    echo "WireGuard values missing; skipping config.toml update"
-  fi
-else
-  echo "Config file not found at $CONFIG_TOML"
-fi
-    echo "=== Starting Node ==="
-    # Generate random ports
-    mapfile -t PORTS < <(shuf -i 1024-65535 -n 2)
-    # Format the URL with a scheme and host that will be properly parsed
-    # NODE_REMOTE_URL="https://${PUBLIC_IP}:${SERVICE_PORT}"
-    echo "=== Starting Node ==="
-    echo "Config file: ${NODE_DIR}/config.toml"
-  
-  # Check if config file exists
-  if [[ ! -f "${NODE_DIR}/config.toml" ]]; then
-    echo "Error: Config file not found at ${NODE_DIR}/config.toml"
-    exit 1
-  fi
-  
-  # Get API port from config
-  API_PORT=$(grep '^api_port = ' "${NODE_DIR}/config.toml" | cut -d'"' -f2)
-  
-  # Get node type from config
-  NODE_TYPE=$(grep '^type = ' "${NODE_DIR}/config.toml" | cut -d'"' -f2)
+    # Sync [wireguard] section in config.toml from /etc/wireguard/wg0.conf
+    update_wireguard_config_from_wg
+
+    # Read dynamic settings from config.toml; fail fast if missing
+    API_PORT_CFG=$(grep '^api_port = ' "${NODE_DIR}/config.toml" | cut -d'"' -f2 || true)
+    NODE_TYPE_CFG=$(grep '^type = ' "${NODE_DIR}/config.toml" | cut -d'"' -f2 || true)
+    if [[ -z "${API_PORT_CFG}" || -z "${NODE_TYPE_CFG}" ]]; then
+      err "Could not read required configuration. Check config.toml format."; exit 1
+    fi
 
   # Remove any existing https:// from the IP address
   CLEAN_IP=${PUBLIC_IP#https://}
   CLEAN_IP=${CLEAN_IP#http://}
   echo "Clean IP: ${CLEAN_IP}"
   
-  # Format the URL properly
+  # Format the URL properly for --node.remote-addrs
   NODE_REMOTE_URL="${CLEAN_IP}"
-  
-  # Debug output
-  echo "Parsed Configuration:"
-  echo "- API Port: ${API_PORT:-Not found}"
-  echo "- Node Type: ${NODE_TYPE:-Not found}"
-  echo "- Node Remote URL: ${NODE_REMOTE_URL:-Not found}"
-  
-  if [[ -z "${API_PORT}" || -z "${NODE_TYPE}" ]]; then
-    echo "Error: Could not read required configuration. Check config.toml format."
-    exit 1
+  echo "Starting node with command:"
+  echo "${BINARY} start --home ${NODE_DIR} --keyring.backend ${KEYRING_BACKEND}"
+
+    # Ensure an up-to-date systemd unit and enable it
+    write_systemd_unit
+    sudo systemctl daemon-reload
+    sudo systemctl enable dvpn-node.service 
+    # sudo systemctl start dvpn-node.service 
+
+    log "Waiting 30 seconds for node to initialize..."
+    sleep 30
+    # Best-effort fetch of node address from local API
+    PUB_IP=$(detect_public_ip)
+    if [[ -n "$PUB_IP" ]]; then
+      NODE_ADDR=$(curl -sk "https://$PUB_IP:$API_PORT_CFG" | jq -r '.result.addr' || true)
+      if [[ -n "$NODE_ADDR" && "$NODE_ADDR" != "null" ]]; then
+        log "Node address: $NODE_ADDR"
+      else
+        log "Node API reachable but address not yet available"
+      fi
+    fi
+}
+
+# Show service status and the most recent logs
+function cmd_status {
+  sudo systemctl status dvpn-node.service --no-pager | cat || true
+  echo "--- Recent logs ---"
+  journalctl -u dvpn-node.service -n 50 --no-pager | cat || true
+}
+
+# Stop the systemd service (no error if not running)
+function cmd_stop {
+  sudo systemctl stop dvpn-node.service || true
+}
+
+# Restart the systemd service
+function cmd_restart {
+  sudo systemctl restart dvpn-node.service || true
+}
+
+# Uninstall dvpn-node systemd service and node data
+function cmd_uninstall_service {
+  echo "[INFO] Uninstalling dvpn-node systemd service and node data..."
+
+  # Stop and disable the service if it exists
+  sudo systemctl stop dvpn-node.service 2>/dev/null || true
+  sudo systemctl disable dvpn-node.service 2>/dev/null || true
+
+  # Remove unit file if present and reload daemon
+  if [[ -f "${SYSTEMD_UNIT}" ]]; then
+    sudo rm -f "${SYSTEMD_UNIT}" || true
+    sudo systemctl daemon-reload || true
+  else
+    # Still reload in case it existed previously
+    sudo systemctl daemon-reload || true
   fi
 
-  
-  echo "Starting node with command:"
-  echo "${BINARY} start --home ${NODE_DIR} --keyring.backend ${KEYRING_BACKEND} --node.remote-addrs ${NODE_REMOTE_URL}"
-  
-  # Start the node
-  # "${BINARY}" start \
-  #   --home "${NODE_DIR}" \
-  #   --keyring.backend "${KEYRING_BACKEND}"
-  #   --log.level "${LOG_LEVEL}" 
-#   sudo systemctl start wg-quick@wg0
-# echo "Starting node:"
-# #========================================================================================================================================================
-# sudo su -c  "echo '[Unit]
-# Description=Qubetics dVPN Node
-# Wants=network-online.target
-# After=network-online.target
-# [Service]
-# User=$(whoami)
-# Group=$(whoami)
-# Type=simple
-# ExecStart=/${HOME}/.go/bin/qubetics-dvpnx start --home $NODE_DIR --keyring.backend test
-# Restart=always
-# RestartSec=5
-# LimitNOFILE=65536
-# Environment="DAEMON_NAME=$BINARY"
-# Environment="DAEMON_HOME="$NODE_DIR""
-# Environment="DAEMON_ALLOW_DOWNLOAD_BINARIES=false"
-# Environment="DAEMON_RESTART_AFTER_UPGRADE=true"
-# Environment="DAEMON_LOG_BUFFER_SIZE=512"
-# Environment="UNSAFE_SKIP_BACKUP=false"
-# [Install]
-# WantedBy=multi-user.target'> /etc/systemd/system/dvpn-node.service"
+  # Remove node data directory
+  if [[ -n "${NODE_DIR}" && -d "${NODE_DIR}" ]]; then
+    sudo rm -rf "${NODE_DIR}" || true
+  fi
 
-# sudo systemctl daemon-reload
-# sudo systemctl enable dvpn-node.service 
-# sudo systemctl start dvpn-node.service 
-
-# # Wait a few minutes before fetching node address
-# echo "Waiting 30 seconds for node to initialize..."
-# sleep 30
-# NODE_ADDR=$(curl -sk https://$PUBLIC_IP:$API_PORT | jq -r '.result.addr')
-# NODE_ADDR=$(curl -sk https://125.21.216.158:18133 | jq -r '.result.addr')
-# echo "Node address: $NODE_ADDR"
+  echo "[INFO] dvpn-node service and data removed."
 }
 
-function cmd_status {
-  echo "Last 20 log lines (if started in background with redirection):"
-  tail -n 20 "${NODE_DIR}/node.log" 2>/dev/null || echo "No log file found."
-}
+# Uninstall WireGuard and clean configuration
+function cmd_uninstall_wireguard {
+  echo "[INFO] Uninstalling WireGuard and cleaning up..."
 
-function cmd_stop {
-  pkill -f "${BINARY} start --home ${NODE_DIR}" || echo "No running node process found."
-}
+  # Bring down configured interface if available
+  if command -v wg-quick >/dev/null 2>&1; then
+    if [[ -n "${WG_CONF}" && -f "${WG_CONF}" ]]; then
+      iface=$(basename "${WG_CONF}" .conf)
+      sudo wg-quick down "$iface" || true
+    fi
+    # Also attempt to bring down any other WireGuard interfaces
+    for conf in /etc/wireguard/*.conf; do
+      [[ -e "$conf" ]] || break
+      iface=$(basename "$conf" .conf)
+      sudo wg-quick down "$iface" || true
+    done
+  fi
 
-function cmd_restart {
-  cmd_stop
-  sleep 1
-  cmd_start
+  # Disable and stop potential wg-quick unit
+  if [[ -f "/etc/wireguard/wg0.conf" ]]; then
+    sudo systemctl disable --now wg-quick@wg0 2>/dev/null || true
+  fi
+
+  # Purge packages and autoremove
+  if command -v apt >/dev/null 2>&1; then
+    sudo apt purge -y wireguard wireguard-tools || true
+    sudo apt autoremove -y || true
+  fi
+
+  # Remove configuration directory
+  sudo rm -rf /etc/wireguard || true
+
+  echo "[INFO] WireGuard uninstalled."
 }
 
 # Dispatch commands
@@ -279,6 +364,8 @@ case "${v}" in
   "stop") cmd_stop ;;
   "restart") cmd_restart ;;
   "status") cmd_status ;;
+  "uninstall-wireguard") cmd_uninstall_wireguard ;;
+  "uninstall-service") cmd_uninstall_service ;;
   "help" | *) cmd_help ;;
 esac
 

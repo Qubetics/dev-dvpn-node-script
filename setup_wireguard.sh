@@ -120,7 +120,7 @@ parse_arguments() {
 
 # Main execution
 main() {
-     wireguard_install
+    wireguard_install
     parse_arguments "$@"
     check_root
     handle_keys
