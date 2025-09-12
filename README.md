@@ -23,7 +23,9 @@ Notes:
 
 ```bash
 cd /dev-dvpn-node-script
-sudo  ./install-go.sh
+ ./install-go.sh
+source ~/.bashrc
+source ~/.profile
 ```
 
 This updates your shell profile so `go` is on your `PATH` in new sessions.
