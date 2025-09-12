@@ -23,7 +23,7 @@ Notes:
 
 ```bash
 cd /dev-dvpn-node-script
-sudo bash ./install-go.sh
+sudo  ./install-go.sh
 ```
 
 This updates your shell profile so `go` is on your `PATH` in new sessions.
@@ -35,9 +35,9 @@ You must have a working WireGuard interface (`wg0`) before initializing the node
 
 #### Install via script (recommended)
 ```bash
-sudo bash ./setup_wireguard.sh
+sudo  ./setup_wireguard.sh
 # or provide your own private key (base64):
-sudo bash ./setup_wireguard.sh --private-key "<YOUR_BASE64_PRIVATE_KEY>"
+sudo  ./setup_wireguard.sh --private-key "<YOUR_BASE64_PRIVATE_KEY>"
 ```
 What the script does:
 - Installs `wireguard` and `wireguard-tools`

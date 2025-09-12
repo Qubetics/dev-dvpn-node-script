@@ -131,12 +131,12 @@ function cmd_init {
   fi
   # --- Go Installation Check ---
 if ! command -v go &> /dev/null; then
-  echo "Go not found. Installing Go..."
+  echo "Go not found.  Installing Go. with ./install-go.sh"
   bash "$(dirname "$0")/install-go.sh"
   # Reload env so newly installed Go is available in this session
-  source ~/.profile
-  source ~/.bashrc
-  echo "Go installed and environment updated."
+  # source ~/.profile
+  # source ~/.bashrc
+  # echo "Go installed and environment updated."
 else
   echo "Go is already installed. Skipping installation."
 fi
