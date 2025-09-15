@@ -41,6 +41,11 @@ sudo  ./setup_wireguard.sh
 # or provide your own private key (base64):
 sudo  ./setup_wireguard.sh --private-key "<YOUR_BASE64_PRIVATE_KEY>"
 ```
+
+#### Uninstall wireguard via script
+```bash
+sudo  ./setup_wireguard.sh --uninstall
+```
 What the script does:
 - Installs `wireguard` and `wireguard-tools`
 - Generates or imports keys under `/etc/wireguard`

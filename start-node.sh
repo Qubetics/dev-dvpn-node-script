@@ -322,17 +322,16 @@ function cmd_uninstall_service {
   echo "[INFO] dvpn-node service and data removed."
 }
 
-# Uninstall WireGuard and clean configuration
+# Uninstall WireGuard and thoroughly clean configuration, DNS, and firewall
 function cmd_uninstall_wireguard {
   echo "[INFO] Uninstalling WireGuard and cleaning up..."
 
-  # Bring down configured interface if available
+  # Bring down configured interfaces (runs PostDown rules if present)
   if command -v wg-quick >/dev/null 2>&1; then
     if [[ -n "${WG_CONF}" && -f "${WG_CONF}" ]]; then
       iface=$(basename "${WG_CONF}" .conf)
       sudo wg-quick down "$iface" || true
     fi
-    # Also attempt to bring down any other WireGuard interfaces
     for conf in /etc/wireguard/*.conf; do
       [[ -e "$conf" ]] || break
       iface=$(basename "$conf" .conf)
@@ -340,21 +339,68 @@ function cmd_uninstall_wireguard {
     done
   fi
 
-  # Disable and stop potential wg-quick unit
+  # Revert DNS for wg interfaces
+  if command -v resolvectl >/dev/null 2>&1; then
+    sudo resolvectl revert wg0 2>/dev/null || true
+  fi
+  if command -v resolvconf >/dev/null 2>&1; then
+    sudo resolvconf -d wg0.inet 2>/dev/null || true
+  fi
+
+  # Delete lingering wg0 link if still present
+  ip link show wg0 >/dev/null 2>&1 && sudo ip link del wg0 || true
+
+  # Determine current primary egress interface for cleanup
+  CLEAN_IFACE=$(ip route get 1.1.1.1 2>/dev/null | awk '/ dev / {for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
+  [[ -z "$CLEAN_IFACE" ]] && CLEAN_IFACE=$(ip route | awk '/^default/ {print $5; exit}')
+
+  # Remove iptables/ip6tables rules
+  sudo iptables -D INPUT -p udp --dport 51820 -j ACCEPT 2>/dev/null || true
+  sudo iptables -D FORWARD -i wg0 -o ${CLEAN_IFACE} -j ACCEPT 2>/dev/null || true
+  sudo iptables -D FORWARD -i ${CLEAN_IFACE} -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+  sudo iptables -t nat -D POSTROUTING -o ${CLEAN_IFACE} -j MASQUERADE 2>/dev/null || true
+  sudo ip6tables -D FORWARD -i wg0 -o ${CLEAN_IFACE} -j ACCEPT 2>/dev/null || true
+  sudo ip6tables -D FORWARD -i ${CLEAN_IFACE} -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+  sudo ip6tables -t nat -D POSTROUTING -o ${CLEAN_IFACE} -j MASQUERADE 2>/dev/null || true
+
+  # nftables cleanup
+  nft delete rule ip wg-nat POSTROUTING oifname "${CLEAN_IFACE}" masquerade 2>/dev/null || true
+  nft list chains ip wg-nat >/dev/null 2>&1 && nft flush chain ip wg-nat POSTROUTING 2>/dev/null || true
+  nft list tables ip | grep -q wg-nat && nft delete table ip wg-nat 2>/dev/null || true
+
+  # Stop/disable wg-quick unit if present
+  sudo systemctl stop wg-quick@wg0 2>/dev/null || true
+  sudo systemctl disable wg-quick@wg0 2>/dev/null || true
+
+  # Close firewall port for WireGuard
+  WG_PORT_CLEAN=""
   if [[ -f "/etc/wireguard/wg0.conf" ]]; then
-    sudo systemctl disable --now wg-quick@wg0 2>/dev/null || true
+    WG_PORT_CLEAN=$(grep -m1 '^ListenPort' /etc/wireguard/wg0.conf | awk -F '=' '{print $2}' | xargs)
+  fi
+  if [[ -z "$WG_PORT_CLEAN" ]]; then
+    WG_PORT_CLEAN=51820
+  fi
+  if command -v ufw >/dev/null 2>&1; then
+    sudo ufw delete allow ${WG_PORT_CLEAN}/udp 2>/dev/null || true
+  fi
+  if command -v firewall-cmd >/dev/null 2>&1 && sudo systemctl is-active --quiet firewalld; then
+    sudo firewall-cmd --remove-port=${WG_PORT_CLEAN}/udp --permanent 2>/dev/null || true
+    sudo firewall-cmd --reload 2>/dev/null || true
   fi
 
-  # Purge packages and autoremove
+  # Remove configs/keys and try unloading kernel module
+  sudo rm -rf /etc/wireguard 2>/dev/null || true
+  if lsmod | grep -q '^wireguard\b'; then
+    sudo modprobe -r wireguard 2>/dev/null || true
+  fi
+
+  # Purge packages
   if command -v apt >/dev/null 2>&1; then
-    sudo apt purge -y wireguard wireguard-tools || true
-    sudo apt autoremove -y || true
+    sudo apt purge -y wireguard wireguard-tools resolvconf 2>/dev/null || true
+    sudo apt autoremove -y 2>/dev/null || true
   fi
 
-  # Remove configuration directory
-  sudo rm -rf /etc/wireguard || true
-
-  echo "[INFO] WireGuard uninstalled."
+  echo "[INFO] WireGuard fully uninstalled and cleaned up."
 }
 
 # Dispatch commands
